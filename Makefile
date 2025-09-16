@@ -1,77 +1,114 @@
-# Makefile
-  
-SHELL := /bin/bash
+.PHONY: clean build user
+all: build_kernel
 
-DOCKER_NAME ?= uCore-RV-64-Base
-DIR := workplace
+LOG ?= error
+
+K = os
+
+TOOLPREFIX = riscv64-unknown-elf-
+CC = $(TOOLPREFIX)gcc
+AS = $(TOOLPREFIX)gcc
+LD = $(TOOLPREFIX)ld
+OBJCOPY = $(TOOLPREFIX)objcopy
+OBJDUMP = $(TOOLPREFIX)objdump
+PY = python3
+GDB = $(TOOLPREFIX)gdb
+CP = cp
+MKDIR_P = mkdir -p
+
+BUILDDIR = build
+C_SRCS = $(wildcard $K/*.c)
+AS_SRCS = $(wildcard $K/*.S)
+C_OBJS = $(addprefix $(BUILDDIR)/, $(addsuffix .o, $(basename $(C_SRCS))))
+AS_OBJS = $(addprefix $(BUILDDIR)/, $(addsuffix .o, $(basename $(AS_SRCS))))
+OBJS = $(C_OBJS) $(AS_OBJS)
+
+HEADER_DEP = $(addsuffix .d, $(basename $(C_OBJS)))
+
+-include $(HEADER_DEP)
+
+CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb
+CFLAGS += -MD
+CFLAGS += -mcmodel=medany
+CFLAGS += -ffreestanding -fno-common -nostdlib -mno-relax
+CFLAGS += -I$K
+CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+
+ifeq ($(LOG), error)
+CFLAGS += -D LOG_LEVEL_ERROR
+else ifeq ($(LOG), warn)
+CFLAGS += -D LOG_LEVEL_WARN
+else ifeq ($(LOG), info)
+CFLAGS += -D LOG_LEVEL_INFO
+else ifeq ($(LOG), debug)
+CFLAGS += -D LOG_LEVEL_DEBUG
+else ifeq ($(LOG), trace)
+CFLAGS += -D LOG_LEVEL_TRACE
+endif
+
+# Disable PIE when possible (for Ubuntu 16.10 toolchain)
+ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
+CFLAGS += -fno-pie -no-pie
+endif
+ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
+CFLAGS += -fno-pie -nopie
+endif
+
+LDFLAGS = -z max-page-size=4096
+
+$(AS_OBJS): $(BUILDDIR)/$K/%.o : $K/%.S
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(C_OBJS): $(BUILDDIR)/$K/%.o : $K/%.c  $(BUILDDIR)/$K/%.d
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(HEADER_DEP): $(BUILDDIR)/$K/%.d : $K/%.c
+	@mkdir -p $(@D)
+	@set -e; rm -f $@; $(CC) -MM $< $(INCLUDEFLAGS) > $@.$$$$; \
+        sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@; \
+        rm -f $@.$$$$
+
+build: build/kernel
+
+build/kernel: $(OBJS)
+	$(LD) $(LDFLAGS) -T os/kernel.ld -o $(BUILDDIR)/kernel $(OBJS)
+	$(OBJDUMP) -S $(BUILDDIR)/kernel > $(BUILDDIR)/kernel.asm
+	$(OBJDUMP) -t $(BUILDDIR)/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(BUILDDIR)/kernel.sym
+	@echo 'Build kernel done'
 
 clean:
-	rm -rf ${DIR}
+	rm -rf $(BUILDDIR)
 
-docker:
-	docker pull nzpznk/oslab-c-env
-	docker run -it --name ${DOCKER_NAME} ${DOCKER_IMAGE_NAME} /bin/bash
+# BOARD
+BOARD		?= qemu
+SBI			?= rustsbi
+BOOTLOADER	:= ./bootloader/rustsbi-qemu.bin
 
+QEMU = qemu-system-riscv64
+QEMUOPTS = \
+	-nographic \
+	-machine virt \
+	-bios $(BOOTLOADER) \
+	-kernel build/kernel	\
 
-# for local ubuntu with zsh shell SHELL, need root for sudo 
-ubuntu_setenv:
-	cd ${HOME} && sudo wget https://static.dev.sifive.com/dev-tools/freedom-tools/v2020.08/riscv64-unknown-elf-gcc-10.1.0-2020.08.2-x86_64-linux-ubuntu14.tar.gz
-	cd ${HOME} && sudo tar xzf riscv64-unknown-elf-gcc-10.1.0-2020.08.2-x86_64-linux-ubuntu14.tar.gz
-	cd ${HOME} && sudo mv riscv64-unknown-elf-gcc-10.1.0-2020.08.2-x86_64-linux-ubuntu14 riscv64-unknown-elf-gcc
-	cd ${HOME} && sudo git clone https://github.com/os-lecture/toolchain-riscv64-linux-musl-cross.git riscv64-linux-musl-cross
-	#cd ${HOME} && sudo wget -O riscv64-linux-musl-cross.tgz https://cloud.tsinghua.edu.cn/f/11646b3c420d4055ba20/?dl=1
-	#cd ${HOME} && sudo tar xzf riscv64-linux-musl-cross.tgz
-	#sudo echo export PATH=\"\$$HOME/riscv64-unknown-elf-gcc/bin:\$$PATH\" >>  ~/.bashrc
-	#sudo echo export PATH=\"\$$HOME/riscv64-linux-musl-cross/bin:\$$PATH\" >> ~/.bashrc
-	#source ~/.bashrc  
-	sudo ln -s $$HOME/riscv64-unknown-elf-gcc/bin/* /usr/bin/
-	sudo ln -s $$HOME/riscv64-linux-musl-cross/bin/* /usr/bin/
-	sudo apt install -y cmake
-	sudo apt update -y
-	sudo apt upgrade -y
-	sudo apt install -y autoconf automake autotools-dev curl libmpc-dev libmpfr-dev libgmp-dev \
-		      gawk build-essential bison flex texinfo gperf libtool patchutils bc \
-		      zlib1g-dev libexpat-dev pkg-config  libglib2.0-dev libpixman-1-dev git tmux python3 ninja-build
-	cd ${HOME} && sudo wget https://download.qemu.org/qemu-7.0.0.tar.xz
-	cd ${HOME} && sudo tar xJf qemu-7.0.0.tar.xz
-	cd ${HOME}/qemu-7.0.0 && sudo ./configure --target-list=riscv64-softmmu,riscv64-linux-user
-	cd ${HOME}/qemu-7.0.0 && sudo make -j$$(nproc)
-	cd ${HOME}/qemu-7.0.0 && sudo make install
-	sudo echo export PATH=\"\$${HOME}/qemu-7.0.0:\$$PATH\" >> ~/.bashrc
-	sudo echo export PATH=\"\$${HOME}/qemu-7.0.0/riscv64-softmmu:\$$PATH\" >> ~/.bashrc
-	sudo echo export PATH=\"\$${HOME}/qemu-7.0.0/riscv64-linux-user:\$$PATH\" >> ~/.bashrc
-	source ~/.bashrc
-	qemu-system-riscv64 --version
-	qemu-riscv64 --version
+run: build/kernel
+	$(QEMU) $(QEMUOPTS)
 
+# QEMU's gdb stub command line changed in 0.11
+QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+	then echo "-gdb tcp::15234"; \
+	else echo "-s -p 15234"; fi)
 
-# for github codespaces ubuntu with zsh SHELL, need root for sudo
-codespaces_setenv:	
-	cd ${HOME} && sudo wget https://static.dev.sifive.com/dev-tools/freedom-tools/v2020.08/riscv64-unknown-elf-gcc-10.1.0-2020.08.2-x86_64-linux-ubuntu14.tar.gz
-	cd ${HOME} && sudo tar xzf riscv64-unknown-elf-gcc-10.1.0-2020.08.2-x86_64-linux-ubuntu14.tar.gz
-	cd ${HOME} && sudo mv riscv64-unknown-elf-gcc-10.1.0-2020.08.2-x86_64-linux-ubuntu14 riscv64-unknown-elf-gcc
-	cd ${HOME} && sudo git clone https://github.com/os-lecture/toolchain-riscv64-linux-musl-cross.git riscv64-linux-musl-cross
-	#cd ${HOME} && sudo wget -O riscv64-linux-musl-cross.tgz https://cloud.tsinghua.edu.cn/f/11646b3c420d4055ba20/?dl=1
-	#cd ${HOME} && sudo tar xzf riscv64-linux-musl-cross.tgz
-	#sudo echo export PATH=\"\$$HOME/riscv64-unknown-elf-gcc/bin:\$$PATH\" >>  ~/.bashrc
-	#sudo echo export PATH=\"\$$HOME/riscv64-linux-musl-cross/bin:\$$PATH\" >> ~/.bashrc
-	#source ~/.bashrc  
-	sudo ln -s $$HOME/riscv64-unknown-elf-gcc/bin/* /usr/bin/
-	sudo ln -s $$HOME/riscv64-linux-musl-cross/bin/* /usr/bin/
-	sudo apt install -y cmake
-	sudo apt update -y
-	sudo apt upgrade -y
-	sudo apt install -y autoconf automake autotools-dev curl libmpc-dev libmpfr-dev libgmp-dev \
-		      gawk build-essential bison flex texinfo gperf libtool patchutils bc \
-		      zlib1g-dev libexpat-dev pkg-config  libglib2.0-dev libpixman-1-dev git tmux python3 ninja-build
-	cd ${HOME} && sudo wget https://download.qemu.org/qemu-7.0.0.tar.xz
-	cd ${HOME} && sudo tar xJf qemu-7.0.0.tar.xz
-	cd ${HOME}/qemu-7.0.0 && sudo ./configure --target-list=riscv64-softmmu,riscv64-linux-user
-	cd ${HOME}/qemu-7.0.0 && sudo make -j$$(nproc)
-	cd ${HOME}/qemu-7.0.0 && sudo make install
-	sudo echo export PATH=\"\$${HOME}/qemu-7.0.0:\$$PATH\" >> ~/.bashrc
-	sudo echo export PATH=\"\$${HOME}/qemu-7.0.0/riscv64-softmmu:\$$PATH\" >> ~/.bashrc
-	sudo echo export PATH=\"\$${HOME}/qemu-7.0.0/riscv64-linux-user:\$$PATH\" >> ~/.bashrc
-	source ~/.bashrc
-	qemu-system-riscv64 --version
-	qemu-riscv64 --version
+debug: build/kernel .gdbinit
+	@tmux new-session -d \
+		$(QEMU) $(QEMUOPTS) -S $(QEMUGDB) && \
+		tmux split-window -h "$(GDB) -ex 'target remote localhost:15234'" && \
+		tmux -2 attach-session -d
+
+gdbserver: build/kernel
+	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
+
+gdbclient:
+	$(GDB) -ex "target remote localhost:15234"
