@@ -48,3 +48,8 @@ void shutdown()
 {
 	sbi_call(SBI_EID_SRST, SBI_FID_SYSTEM_RESET, SBI_RESET_TYPE_SHUTDOWN, SBI_RESET_REASON_NO_REASON, 0);
 }
+
+void set_timer(uint64 stime)
+{
+	sbi_call(SBI_EID_TIME, SBI_FID_SET_TIMER, stime, 0, 0);
+}
